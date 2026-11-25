@@ -4,10 +4,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:name=".App"
-        android:label="Mobilador Roblox"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:label="Mouse Livre"
         android:theme="@android:style/Theme.Material.NoActionBar">
 
         <activity android:name=".MainActivity" android:exported="true">
@@ -23,7 +26,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="overlay mouse and keyboard mapper" />
+                android:value="overlay mouse capture" />
         </service>
 
         <provider
