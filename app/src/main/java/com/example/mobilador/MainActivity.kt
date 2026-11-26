@@ -178,11 +178,11 @@ class MainActivity : Activity() {
         val skinRow = LinearLayout(this)
         Skins.names.forEachIndexed { i, name ->
             val sv = SkinView(this, i).apply {
-                selected = prefs.getInt("skin", 0) == i
+                picked = prefs.getInt("skin", 0) == i
                 setOnClickListener {
                     prefs.edit().putInt("skin", i).apply()
-                    skinViews.forEach { it.selected = false; it.invalidate() }
-                    selected = true; invalidate()
+                    skinViews.forEach { it.picked = false; it.invalidate() }
+                    picked = true; invalidate()
                 }
                 bounce()
             }
