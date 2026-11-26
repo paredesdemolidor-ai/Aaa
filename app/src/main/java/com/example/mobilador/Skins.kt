@@ -62,14 +62,14 @@ object Skins {
 
 /** Miniatura de uma skin para a galeria. */
 class SkinView(c: Context, private val skin: Int) : View(c) {
-    var selected = false
+    var picked = false
     private val bg = Paint(Paint.ANTI_ALIAS_FLAG)
 
     override fun onDraw(canvas: Canvas) {
         val w = width.toFloat(); val h = height.toFloat()
         bg.style = Paint.Style.FILL; bg.color = Pal.CARD2
         canvas.drawRoundRect(RectF(0f, 0f, w, h), 24f, 24f, bg)
-        if (selected) {
+        if (picked) {
             bg.style = Paint.Style.STROKE; bg.strokeWidth = 5f; bg.color = Pal.PRIMARY
             canvas.drawRoundRect(RectF(3f, 3f, w - 3f, h - 3f), 22f, 22f, bg)
         }
