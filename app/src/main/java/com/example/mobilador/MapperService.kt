@@ -19,20 +19,13 @@ import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.min
 
-/** View que captura o mouse (movimento relativo) e desenha o cursor virtual. */
+/** Captura o mouse (movimento relativo) e desenha o cursor virtual com a skin escolhida. */
 class CaptureView(c: Context) : View(c) {
     var showCursor = false
     var curX = 0f
     var curY = 0f
+    var skin = 0
     var onCapture: ((Boolean) -> Unit)? = null
-    private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; style = Paint.Style.FILL }
-    private val line = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.BLACK; style = Paint.Style.STROKE; strokeWidth = 3f; strokeJoin = Paint.Join.ROUND
-    }
-    private val path = Path().apply {
-        moveTo(0f, 0f); lineTo(0f, 34f); lineTo(9f, 26f); lineTo(16f, 42f)
-        lineTo(23f, 39f); lineTo(16f, 24f); lineTo(28f, 24f); close()
-    }
 
     override fun onPointerCaptureChange(hasCapture: Boolean) {
         super.onPointerCaptureChange(hasCapture)
@@ -45,7 +38,7 @@ class CaptureView(c: Context) : View(c) {
         val s = resources.displayMetrics.density * 0.7f
         canvas.save()
         canvas.translate(curX - loc[0], curY - loc[1]); canvas.scale(s, s)
-        canvas.drawPath(path, fill); canvas.drawPath(path, line)
+        Skins.draw(canvas, skin)
         canvas.restore()
     }
 }
@@ -54,8 +47,8 @@ class MapperService : Service() {
 
     companion object { @Volatile var running = false }
 
-    private val TAP = 0
-    private val CAM = 1
+    private val TAP = 0   // dedo do cursor virtual
+    private val CAM = 1   // dedo da câmera (elementos do mapeamento usam 2..30)
 
     private lateinit var wm: WindowManager
     private lateinit var prefs: SharedPreferences
@@ -76,16 +69,29 @@ class MapperService : Service() {
     private var menuClosedAt = 0L
     private var trash: TextView? = null
     private var stats: TextView? = null
+    private var editor: MapperEditor? = null
+    private var watcher: HotkeyWatcher? = null
 
-    private var mouseOn = false
+    // ---- mapeamento ----
+    private var elements: MutableList<El> = ArrayList()
+    private val joyKeys = HashMap<Int, BooleanArray>()
+    private val joyDown = HashMap<Int, Boolean>()
+    private val toggled = HashSet<Int>()
+
+    // ---- estado do mouse ----
+    private var locked = false
+    private var cursorMode = false
+    private var capHas = false
+    private var lastToggle = 0L
+    private var prevButtons = 0
     private var sens = 1.5f
     private var cx = 0f
     private var cy = 0f
     private var leftDown = false
-    private var rightDown = false
     private var camX = 0f
     private var camY = 0f
     private var camDown = false
+    private val idleCam = Runnable { endCam() }
 
     // ---- proteção da tela ----
     @Volatile private var applied = false
@@ -98,6 +104,7 @@ class MapperService : Service() {
         when (key) {
             "sens" -> sens = p.getFloat("sens", 1.5f)
             "stats" -> applyStats()
+            "skin" -> capView?.let { it.skin = p.getInt("skin", 0); it.invalidate() }
         }
     }
 
@@ -116,8 +123,9 @@ class MapperService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (capView == null) start()
         when (intent?.action) {
-            "MOUSE" -> setMouse(!mouseOn)
+            "MOUSE" -> setMouse(!locked)
             "BUBBLE" -> if (bubble != null) hideBubble() else showBubble()
+            "EDIT" -> openEditor()
             "STOP" -> { stopSelf(); return START_NOT_STICKY }
         }
         return START_STICKY
@@ -128,12 +136,13 @@ class MapperService : Service() {
         running = true
         prefs = getSharedPreferences("p", 0)
         sens = prefs.getFloat("sens", 1.5f)
+        elements = Store.load(prefs)
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         workerThread = HandlerThread("w").also { it.start() }
         worker = Handler(workerThread.looper)
 
         getSystemService(NotificationManager::class.java).createNotificationChannel(
-            NotificationChannel("m", "Mouse Livre", NotificationManager.IMPORTANCE_LOW))
+            NotificationChannel("m", "Orbyx", NotificationManager.IMPORTANCE_LOW))
         val n = buildNotif()
         if (Build.VERSION.SDK_INT >= 34) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         else startForeground(1, n)
@@ -142,21 +151,39 @@ class MapperService : Service() {
         val v = CaptureView(this).apply {
             isFocusable = true
             isFocusableInTouchMode = true
+            skin = prefs.getInt("skin", 0)
             setOnCapturedPointerListener { _, e -> onMouse(e); true }
             setOnKeyListener { _, code, e ->
-                if (e.action == KeyEvent.ACTION_DOWN && e.repeatCount == 0 &&
-                    code == prefs.getInt("relKey", KeyEvent.KEYCODE_ESCAPE)) { setMouse(false); true } else false
+                val down = e.action == KeyEvent.ACTION_DOWN
+                when (code) {
+                    prefs.getInt("lockKey", KeyEvent.KEYCODE_ESCAPE) -> {
+                        if (down && e.repeatCount == 0) toggleLock(); true
+                    }
+                    prefs.getInt("curKey", KeyEvent.KEYCODE_ALT_LEFT) -> {
+                        if (e.repeatCount == 0) setCursorMode(down); true
+                    }
+                    else -> { if (!down || e.repeatCount == 0) mapKey(code, down); true }
+                }
             }
-            onCapture = { has -> showCursor = has && mouseOn; invalidate() }
+            onCapture = { has ->
+                capHas = has
+                showCursor = has && locked && cursorMode
+                invalidate()
+            }
         }
         capView = v
         wm.addView(v, capLp)
-        v.viewTreeObserver.addOnWindowFocusChangeListener { f -> if (f && mouseOn) v.requestPointerCapture() }
+        v.viewTreeObserver.addOnWindowFocusChangeListener { f -> if (f && locked) v.requestPointerCapture() }
 
         prefs.registerOnSharedPreferenceChangeListener(prefListener)
         setMouse(true)
         showBubble()
         applyStats()
+
+        // a tecla de travar/soltar vale mesmo com o mouse solto (lida direto do aparelho)
+        watcher = HotkeyWatcher { sc ->
+            if (sc == prefs.getInt("lockScan", 1)) ui.post { toggleLock() }
+        }.also { it.start() }
 
         // sobra de uma execução anterior que travou? devolve a tela ao normal antes de tudo
         worker.post {
@@ -177,19 +204,27 @@ class MapperService : Service() {
 
     private fun toast(s: String) { ui.post { Toast.makeText(this, s, Toast.LENGTH_LONG).show() } }
 
-    // ================= mouse =================
+    // ================= travar / soltar =================
+    private fun toggleLock() {
+        val now = SystemClock.uptimeMillis()
+        if (now - lastToggle < 350 || editor != null) return
+        lastToggle = now
+        setMouse(!locked)
+    }
+
     private fun setMouse(on: Boolean) {
         val v = capView ?: return
-        mouseOn = on
+        locked = on
+        releaseAll()
         if (on) {
             val (w, h) = size()
             if (cx == 0f && cy == 0f) { cx = w / 2f; cy = h / 2f }
             capLp.flags = capLp.flags and WLP.FLAG_NOT_FOCUSABLE.inv()
             wm.updateViewLayout(v, capLp)
-            v.curX = cx; v.curY = cy; v.showCursor = true; v.invalidate()
+            v.showCursor = false; v.invalidate()
             v.requestFocus(); v.requestPointerCapture()
         } else {
-            releaseTouches()
+            cursorMode = false
             v.releasePointerCapture()
             v.showCursor = false; v.invalidate()
             capLp.flags = capLp.flags or WLP.FLAG_NOT_FOCUSABLE
@@ -198,50 +233,126 @@ class MapperService : Service() {
         updateNotif()
     }
 
-    private fun releaseTouches() {
-        inj.releaseAll()
-        camDown = false; leftDown = false; rightDown = false
+    /** Segurando a tecla de cursor: o mouse vira cursor (clica em botões do jogo). Solta: volta a girar a câmera. */
+    private fun setCursorMode(on: Boolean) {
+        if (cursorMode == on || !locked) return
+        cursorMode = on
+        endCam()
+        if (!on && leftDown) { inj.up(TAP); leftDown = false }
+        capView?.let { it.curX = cx; it.curY = cy; it.showCursor = on && capHas; it.invalidate() }
     }
 
+    private fun releaseAll() {
+        ui.removeCallbacks(idleCam)
+        inj.releaseAll()
+        camDown = false; leftDown = false; prevButtons = 0
+        joyKeys.clear(); joyDown.clear(); toggled.clear()
+    }
+
+    // ================= mouse =================
     private fun onMouse(e: MotionEvent) {
         val (w, h) = size()
-        val left = (e.buttonState and MotionEvent.BUTTON_PRIMARY) != 0
-        val right = (e.buttonState and MotionEvent.BUTTON_SECONDARY) != 0
-        val isMove = e.actionMasked == MotionEvent.ACTION_MOVE || e.actionMasked == MotionEvent.ACTION_HOVER_MOVE
-
-        if (isMove) {
-            val dx = e.x * sens; val dy = e.y * sens
-            if (right) moveCam(dx, dy, w, h)
-            else {
-                cx = (cx + dx).coerceIn(0f, w - 1f)
-                cy = (cy + dy).coerceIn(0f, h - 1f)
-                if (left) inj.move(TAP, cx, cy)
-                capView?.let { it.curX = cx; it.curY = cy; it.invalidate() }
+        when (e.actionMasked) {
+            MotionEvent.ACTION_SCROLL -> {
+                val v = e.getAxisValue(MotionEvent.AXIS_VSCROLL)
+                if (v != 0f) {
+                    val c = if (v > 0) B_WHEEL_UP else B_WHEEL_DOWN
+                    mapKey(c, true); ui.postDelayed({ mapKey(c, false) }, 60)
+                }
+                return
+            }
+            MotionEvent.ACTION_MOVE, MotionEvent.ACTION_HOVER_MOVE -> {
+                val dx = e.x * sens; val dy = e.y * sens
+                if (cursorMode) {
+                    cx = (cx + dx).coerceIn(0f, w - 1f)
+                    cy = (cy + dy).coerceIn(0f, h - 1f)
+                    if (leftDown) inj.move(TAP, cx, cy)
+                    capView?.let { it.curX = cx; it.curY = cy; it.invalidate() }
+                } else moveCam(dx, dy, w, h)
             }
         }
-        if (right != rightDown) {
-            rightDown = right
-            if (right) { if (leftDown) inj.up(TAP) } else endCam()
-            capView?.let { it.showCursor = !right; it.invalidate() }
-        }
-        if (left != leftDown) {
-            leftDown = left
-            if (left && !rightDown) inj.down(TAP, cx, cy) else if (!left) inj.up(TAP)
+        val bs = e.buttonState
+        if (bs != prevButtons) {
+            for (bit in intArrayOf(1, 2, 4, 8, 16)) {
+                val now = (bs and bit) != 0
+                val was = (prevButtons and bit) != 0
+                if (now == was) continue
+                if (cursorMode && bit == 1) {
+                    leftDown = now
+                    if (now) inj.down(TAP, cx, cy) else inj.up(TAP)
+                } else mapKey(10000 + bit, now)
+            }
+            prevButtons = bs
         }
     }
 
-    /** Botão direito + mover = girar câmera. O "dedo" volta ao centro quando chega no limite. */
+    /** Mouse gira a câmera. O "dedo" volta ao ponto de origem quando chega no limite (nunca trava na borda). */
     private fun moveCam(dx: Float, dy: Float, w: Int, h: Int) {
-        val ax = w * 0.70f; val ay = h * 0.40f
+        val look = elements.firstOrNull { it.type == T_LOOK }
+        val ax = w * (look?.x ?: 0.70f); val ay = h * (look?.y ?: 0.40f)
         val lim = min(w, h) * 0.18f
         if (!camDown) { camX = ax; camY = ay; inj.down(CAM, camX, camY); camDown = true }
         camX += dx; camY += dy
         if (abs(camX - ax) > lim || abs(camY - ay) > lim) {
             inj.up(CAM); camX = ax; camY = ay; inj.down(CAM, camX, camY)
         } else inj.move(CAM, camX, camY)
+        ui.removeCallbacks(idleCam)
+        ui.postDelayed(idleCam, 140)
     }
 
     private fun endCam() { if (camDown) { inj.up(CAM); camDown = false } }
+
+    // ================= teclas e botões → bolinhas =================
+    private fun mapKey(code: Int, down: Boolean) {
+        val (w, h) = size()
+        for (i in elements.indices) {
+            if (i > 28) break
+            val el = elements[i]
+            val slot = 2 + i
+            if (el.type == T_TAP) {
+                if (el.bind != code) continue
+                if (el.mode == 1) {
+                    if (down) {
+                        if (toggled.remove(i)) inj.up(slot)
+                        else { toggled.add(i); inj.down(slot, el.x * w, el.y * h) }
+                    }
+                } else if (down) inj.down(slot, el.x * w, el.y * h) else inj.up(slot)
+            } else if (el.type == T_JOY) {
+                val k = el.binds.indexOf(code)
+                if (k < 0) continue
+                val st = joyKeys.getOrPut(i) { BooleanArray(4) }
+                st[k] = down
+                updateJoy(i, el, st, w, h)
+            }
+        }
+    }
+
+    private fun updateJoy(i: Int, el: El, st: BooleanArray, w: Int, h: Int) {
+        val slot = 2 + i
+        var dx = 0f; var dy = 0f
+        if (st[0]) dy -= 1f
+        if (st[2]) dy += 1f
+        if (st[1]) dx -= 1f
+        if (st[3]) dx += 1f
+        val bx = el.x * w; val by = el.y * h
+        if (dx == 0f && dy == 0f) { if (joyDown.remove(i) == true) inj.up(slot); return }
+        val r = min(w, h) * el.r
+        val n = hypot(dx, dy)
+        if (joyDown[i] != true) { inj.down(slot, bx, by); joyDown[i] = true }
+        inj.move(slot, bx + dx / n * r, by + dy / n * r)
+    }
+
+    private fun openEditor() {
+        if (editor != null) return
+        closeMenu()
+        setMouse(false)
+        val copy = elements.map { it.copy() }.toMutableList()
+        editor = MapperEditor(this, wm, copy) { saved ->
+            editor = null
+            if (saved) { elements = copy; Store.save(prefs, copy) }
+            toast(if (saved) "Mapeamento salvo" else "Edição cancelada")
+        }.also { it.show() }
+    }
 
     // ================= bolinha =================
     private fun showBubble() {
@@ -366,7 +477,7 @@ class MapperService : Service() {
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(10), dp(10), dp(10), dp(4))
-            background = roundBg(Color.parseColor("#F2161A33"), 22)
+            background = roundBg(Color.parseColor("#F2101220"), 22)
             alpha = 0f; scaleX = 0.85f; scaleY = 0.85f
         }
         fun item(text: String, color: Int = Pal.CARD2, act: () -> Unit) {
@@ -374,8 +485,9 @@ class MapperService : Service() {
                 layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(6) }
             })
         }
-        item(if (mouseOn) "🖱  Mouse preso · toque p/ soltar" else "🖱  Mouse solto · toque p/ prender",
-            if (mouseOn) Pal.PRIMARY else Pal.CARD2) { setMouse(!mouseOn) }
+        item(if (locked) "🖱  Mouse preso · soltar" else "🖱  Mouse solto · prender",
+            if (locked) Pal.PRIMARY else Pal.CARD2) { setMouse(!locked) }
+        item("🎯  Editar mapeamento") { openEditor() }
         val si = prefs.getInt("screen", 0)
         item("🖥  Tela: ${Tools.screenLabels[si]}") { cycleScreen() }
         val st = prefs.getBoolean("stats", false)
@@ -426,32 +538,6 @@ class MapperService : Service() {
             rm(stats); stats = null
             worker.removeCallbacks(statsLoop)
         }
-    }
-
-    // ================= notificação =================
-    private fun buildNotif(): Notification {
-        fun pi(a: String) = PendingIntent.getService(this, a.hashCode(),
-            Intent(this, MapperService::class.java).setAction(a), PendingIntent.FLAG_IMMUTABLE)
-        fun act(label: String, a: String) =
-            Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_stat), label, pi(a)).build()
-        val bubbleOn = bubble != null
-        return Notification.Builder(this, "m")
-            .setSmallIcon(R.drawable.ic_stat)
-            .setContentTitle("Mouse Livre")
-            .setContentText(
-                if (!bubbleOn) "Bolinha removida · reative ou pare o app"
-                else if (mouseOn) "Mouse preso" else "Mouse solto")
-            .setContentIntent(PendingIntent.getActivity(this, 0,
-                Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
-            .setOngoing(true)
-            .addAction(act(if (bubbleOn) "Esconder bolinha" else "Mostrar bolinha", "BUBBLE"))
-            .addAction(act(if (mouseOn) "Soltar mouse" else "Prender mouse", "MOUSE"))
-            .addAction(act("Parar", "STOP"))
-            .build()
-    }
-
-    private fun updateNotif() {
-        getSystemService(NotificationManager::class.java).notify(1, buildNotif())
     }
 
     // ================= proteção: tela maior só no Roblox =================
@@ -522,13 +608,41 @@ class MapperService : Service() {
         }.start()
     }
 
+    // ================= notificação =================
+    private fun buildNotif(): Notification {
+        fun pi(a: String) = PendingIntent.getService(this, a.hashCode(),
+            Intent(this, MapperService::class.java).setAction(a), PendingIntent.FLAG_IMMUTABLE)
+        fun act(label: String, a: String) =
+            Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_stat), label, pi(a)).build()
+        val bubbleOn = bubble != null
+        return Notification.Builder(this, "m")
+            .setSmallIcon(R.drawable.ic_stat)
+            .setContentTitle("Orbyx")
+            .setContentText(
+                if (!bubbleOn) "Bolinha removida · reative ou pare o app"
+                else if (locked) "Mouse preso" else "Mouse solto")
+            .setContentIntent(PendingIntent.getActivity(this, 0,
+                Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
+            .setOngoing(true)
+            .addAction(act(if (bubbleOn) "Esconder bolinha" else "Mostrar bolinha", "BUBBLE"))
+            .addAction(act(if (locked) "Soltar mouse" else "Prender mouse", "MOUSE"))
+            .addAction(act("Parar", "STOP"))
+            .build()
+    }
+
+    private fun updateNotif() {
+        getSystemService(NotificationManager::class.java).notify(1, buildNotif())
+    }
+
     // ================= fim =================
     override fun onDestroy() {
         running = false
         stopping = true
         if (capView != null) {
+            watcher?.stop()
+            editor?.dismiss(); editor = null
             prefs.unregisterOnSharedPreferenceChangeListener(prefListener)
-            releaseTouches()
+            releaseAll()
             capView?.releasePointerCapture()
             worker.removeCallbacksAndMessages(null)
             workerThread.quitSafely()
