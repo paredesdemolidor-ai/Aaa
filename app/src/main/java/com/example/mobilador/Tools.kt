@@ -17,13 +17,13 @@ import java.net.Socket
 const val ROBLOX = "com.roblox.client"
 
 object Pal {
-    val BG = Color.parseColor("#0F1226")
-    val CARD = Color.parseColor("#1B1F3B")
-    val CARD2 = Color.parseColor("#2A2F55")
-    val PRIMARY = Color.parseColor("#6C5CE7")
-    val ACCENT = Color.parseColor("#00B8D9")
-    val DANGER = Color.parseColor("#E5484D")
-    val OK = Color.parseColor("#2ECC71")
+    val BG = Color.parseColor("#07080F")
+    val CARD = Color.parseColor("#11131F")
+    val CARD2 = Color.parseColor("#1B1E31")
+    val PRIMARY = Color.parseColor("#7C5CFF")
+    val ACCENT = Color.parseColor("#22D3EE")
+    val DANGER = Color.parseColor("#F0476C")
+    val OK = Color.parseColor("#34D399")
 }
 
 // ---------- helpers de interface ----------
@@ -70,6 +70,9 @@ object Sh {
             "newProcess", Array<String>::class.java, Array<String>::class.java, String::class.java
         ).apply { isAccessible = true }
     }
+
+    fun start(cmd: String): Process =
+        newProc.invoke(null, arrayOf("sh", "-c", cmd), null, null) as Process
 
     fun run(cmd: String): String = try {
         val p = newProc.invoke(null, arrayOf("sh", "-c", "$cmd 2>&1"), null, null) as Process
