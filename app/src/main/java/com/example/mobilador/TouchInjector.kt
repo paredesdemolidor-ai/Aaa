@@ -21,6 +21,14 @@ class TouchInjector {
             .getMethod("asInterface", IBinder::class.java)
             .invoke(null, binder)!!
     }
+    /** Usa o id da tela de toque de verdade, para o Roblox entender que são toques (e mostrar os botões). */
+    private val devId: Int by lazy {
+        InputDevice.getDeviceIds().firstOrNull { id ->
+            val d = InputDevice.getDevice(id)
+            d != null && (d.sources and InputDevice.SOURCE_TOUCHSCREEN) == InputDevice.SOURCE_TOUCHSCREEN
+        } ?: 0
+    }
+
     private val inject by lazy {
         im.javaClass.getMethod("injectInputEvent", InputEvent::class.java, Int::class.javaPrimitiveType)
     }
@@ -56,7 +64,7 @@ class TouchInjector {
         val coords = Array(n) { i -> MotionEvent.PointerCoords().apply {
             x = xs[ids[i]]!!; y = ys[ids[i]]!!; pressure = 1f; size = 1f } }
         val ev = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, n, props, coords,
-            0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0)
+            0, 0, 1f, 1f, devId, 0, InputDevice.SOURCE_TOUCHSCREEN, 0)
         try { inject.invoke(im, ev, 0) } finally { ev.recycle() }
     }
 }
